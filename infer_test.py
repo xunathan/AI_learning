@@ -8,9 +8,9 @@ import json
 import glob
 import os
 
-
 import matplotlib.pyplot as plt
 from PIL import Image, ImageDraw, ImageFont
+
 
 def download_model_and_data():
     onnx_model_url = "https://s3.amazonaws.com/onnx-model-zoo/resnet/resnet50v2/resnet50v2.tar.gz"
@@ -59,11 +59,77 @@ def infer_by_onnx_runtime():
         np.testing.assert_almost_equal(ref_o, o, 4)
     print('ONNX Runtime outputs are similar to reference outputs!')
 
+def load_labels(path):
+    with open(path, 'rb') as f:
+        data = json.load(f)
+    return np.asarray(data)
+
+def preprocess(input_data):
+    img_data = input_data.astype('float32')
+
+    mean_vec = np.array([0.485, 0.456, 0.406])
+    stddev_vec = np.array([0.229, 0.224, 0.225])
+
+    norm_img_data = np.zeros(img_data.shape).astype('float32')
+    for i in range(img_data.shape[0]):
+        norm_img_data[i,:,:] = (img_data[i,:,:]/255 - mean_vec[i]) / stddev_vec[i]
+    norm_img_data = norm_img_data.reshape(1,3,224,224).astype('float32')
+
+    return norm_img_data
+
+def softmax(x):
+    x = x.reshape(-1)
+    e_x = np.exp(x - np.max(x))
+    return e_x / e_x.sum(axis = 0)
+
+def postprocess(result):
+    return softmax(np.array(result)).tolist()
+
+def convert_image_size(path):
+    image = Image.open(path)
+    print("raw Image size: ", image.size)
+
+    if image.size != (224, 224):
+        resized_img = image.resize((224,224),Image.Resampling.LANCZOS)
+        return resized_img
+    return image
+
+def infer_by_image(path):
+    labels = load_labels('imagenet-simple-labels.json')
+    image = convert_image_size(path)
+
+    print("Image size: ", image.size)
+    
+    plt.imshow(image)
+    plt.axis('off')
+    plt.show()
+
+    image_data = np.array(image).transpose(2,0,1)
+    input_data = preprocess(image_data)
+
+    session = onnxruntime.InferenceSession('model/resnet50v2.onnx', None)
+    input_name = session.get_inputs()[0].name
+
+    start = time.time()
+    raw_result = session.run([], {input_name: input_data})
+    end = time.time()
+    res = postprocess(raw_result)
+
+    infer_time = np.round((end -start) * 1000, 2)
+    idx = np.argmax(res)
+
+    print('final top prediction is:'+ labels[idx])
+    print('Inference time: '+ str(infer_time) + " ms")
+    
+
 
 if __name__ == "__main__":
     #download_model_and_data()
-    get_input_and_inf_output()
-    print(len(inputs), len(ref_outputs))
+    #get_input_and_inf_output()
+    #print(len(inputs), len(ref_outputs))
 
-    infer_by_onnx_runtime()
+    #infer_by_onnx_runtime()
+    infer_by_image('data/resnet50v2/image/test.jpg')
+
+
 
