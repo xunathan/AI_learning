@@ -7,6 +7,7 @@ import time
 import json
 import glob
 import os
+import torchvision
 
 import matplotlib.pyplot as plt
 from PIL import Image, ImageDraw, ImageFont
@@ -121,6 +122,25 @@ def infer_by_image(path):
     print('final top prediction is:'+ labels[idx])
     print('Inference time: '+ str(infer_time) + " ms")
     
+def infer_by_torch(path, device):
+    labels = load_labels('imagenet-simple-labels.json')
+    image = convert_image_size(path)
+    image_data = np.array(image).transpose(2,0,1)
+    input_data =  torch.as_tensor(preprocess(image_data)).to(device)
+    print(input_data.shape)
+
+    model = torchvision.models.resnet50(torchvision.models.ResNet50_Weights.DEFAULT).to(device)
+    model.eval()
+
+    start = time.time()
+    with torch.inference_mode():
+        output = model(input_data)
+    idx = torch.argmax(output)
+    end = time.time()
+    infer_time = np.round((end -start) * 1000, 2)
+
+    print('torch prediction is:'+ labels[idx])
+    print('Inference time: '+ str(infer_time) + " ms")
 
 
 if __name__ == "__main__":
@@ -130,6 +150,7 @@ if __name__ == "__main__":
 
     #infer_by_onnx_runtime()
     infer_by_image('data/resnet50v2/image/test.jpg')
+    infer_by_torch('data/resnet50v2/image/test.jpg', 'cpu')
 
 
 
