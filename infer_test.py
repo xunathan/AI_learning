@@ -103,7 +103,7 @@ def infer_by_image(path):
     
     plt.imshow(image)
     plt.axis('off')
-    plt.show()
+    #plt.show()
 
     image_data = np.array(image).transpose(2,0,1)
     input_data = preprocess(image_data)
@@ -150,7 +150,7 @@ if __name__ == "__main__":
 
     #infer_by_onnx_runtime()
     infer_by_image('data/resnet50v2/image/test.jpg')
-    infer_by_torch('data/resnet50v2/image/test.jpg', 'cpu')
+    infer_by_torch('data/resnet50v2/image/test.jpg', 'cuda')
 
 
 
