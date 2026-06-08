@@ -26,8 +26,6 @@ ref_outputs = []
 def get_input_and_inf_output():
     test_data_dir = "./data/resnet50v2/test_data_set"
     
-
-
     for i in range(test_data_num):
         input_file = os.path.join(test_data_dir + '_{}'.format(i), 'input_0.pb')
         tensor = onnx.TensorProto()
@@ -95,7 +93,7 @@ def convert_image_size(path):
         return resized_img
     return image
 
-def infer_by_image(path):
+def infer_by_onnxruntime(path):
     labels = load_labels('imagenet-simple-labels.json')
     image = convert_image_size(path)
 
@@ -142,6 +140,60 @@ def infer_by_torch(path, device):
     print('torch prediction is:'+ labels[idx])
     print('Inference time: '+ str(infer_time) + " ms")
 
+
+def convert_onnx_to_engine(path):
+    import tensorrt as trt
+    TRT_LOGGER = trt.Logger(trt.Logger.WARNING)
+    builder = trt.Builder(TRT_LOGGER)
+    network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH))
+    parser = trt.OnnxParser(network, TRT_LOGGER)
+
+    with open(path, 'rb') as model:
+        if not parser.parse(model.read()):
+            print('ERROR: Failed to parse the ONNX file.')
+            for error in range(parser.num_errors):
+                print(parser.get_error(error))
+            return None
+    config = builder.create_builder_config()
+    config.set_flag(trt.BuilderFlag.FP16)
+    config.max_workspace_size = 1 << 30
+
+    engine = builder.build_cuda_engine(network, config)
+    if engine is None:
+        print("engine build error")
+    return engine
+
+def infer_by_tensorrt(path, device):
+    import tensorrt as trt
+    import pucuda.driver as cuda
+    import pucuda.autoinit
+    labels = load_labels('imagenet-simple-labels.json')
+    image = convert_image_size(path)
+    image_data = np.array(image).transpose(2,0,1)
+    input_data =  torch.as_tensor(preprocess(image_data)).to(device)
+
+    engine = convert_onnx_to_engine(path)
+    context = engine.create_execution_context()
+
+    input_name = "input"
+    output_name = "output"
+    input_shape = (1, 3, 224, 224)
+
+    d_input = cuda.mem_alloc(np.prod(input_shape) * np.float32().itemsize)
+    d_output = cuda.mem_alloc(1000 * np.float32().itemsize)
+
+    context.set_tensor_address(input_name, int(d_input))
+    context.set_tensor_address(output_name, int(d_output))
+
+    context.execute_async_v3(stream_handle=0)
+
+    output_data = np.empty(1000, dtype=np.float32)
+    cuda.memcpy_dtoh(output_data, d_output)
+
+    idx = np.argmax(output_data)
+
+    print('torsorrt prediction is:'+ labels[idx])
+    
 
 if __name__ == "__main__":
     #download_model_and_data()
