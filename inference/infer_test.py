@@ -1,0 +1,208 @@
+import torch
+import numpy as np
+import onnxruntime
+import onnx
+import urllib.request
+import time
+import json
+import glob
+import os
+import torchvision
+
+import matplotlib.pyplot as plt
+from PIL import Image, ImageDraw, ImageFont
+
+
+def download_model_and_data():
+    onnx_model_url = "https://s3.amazonaws.com/onnx-model-zoo/resnet/resnet50v2/resnet50v2.tar.gz"
+    imagenet_labels_url = "https://raw.githubusercontent.com/anishathalye/imagenet-simple-labels/master/imagenet-simple-labels.json"
+
+    urllib.request.urlretrieve(onnx_model_url, filename="resnet50v2.tar.gz")
+    urllib.request.urlretrieve(imagenet_labels_url, filename="imagenet-simple-labels.json")
+
+test_data_num = 3
+inputs = []
+ref_outputs = []
+def get_input_and_inf_output():
+    test_data_dir = "./data/resnet50v2/test_data_set"
+    
+    for i in range(test_data_num):
+        input_file = os.path.join(test_data_dir + '_{}'.format(i), 'input_0.pb')
+        tensor = onnx.TensorProto()
+        with open(input_file, 'rb') as f:
+            tensor.ParseFromString(f.read())
+            inputs.append(onnx.numpy_helper.to_array(tensor))
+    
+    print("loaded {} inputs successfully".format(test_data_num))
+
+
+    for i in range(test_data_num):
+        output_file = os.path.join(test_data_dir + '_{}'.format(i), 'output_0.pb')
+        tensor = onnx.TensorProto()
+        with open(output_file, 'rb') as f:
+            tensor.ParseFromString(f.read())
+            ref_outputs.append(onnx.numpy_helper.to_array(tensor))
+    
+    print('loaded {} reference outputs sucessfully'.format(test_data_num))
+            
+
+def infer_by_onnx_runtime():
+    session = onnxruntime.InferenceSession('model/resnet50v2.onnx', None)
+    input_name = session.get_inputs()[0].name
+    print('Input Name', input_name)
+
+    out_puts = [session.run([], {input_name: inputs[i]})[0] for i in range(test_data_num)]
+    print('Predicted {} results'.format(len(out_puts)))
+
+    for ref_o, o in zip(ref_outputs, out_puts):
+        np.testing.assert_almost_equal(ref_o, o, 4)
+    print('ONNX Runtime outputs are similar to reference outputs!')
+
+def load_labels(path):
+    with open(path, 'rb') as f:
+        data = json.load(f)
+    return np.asarray(data)
+
+def preprocess(input_data):
+    img_data = input_data.astype('float32')
+
+    mean_vec = np.array([0.485, 0.456, 0.406])
+    stddev_vec = np.array([0.229, 0.224, 0.225])
+
+    norm_img_data = np.zeros(img_data.shape).astype('float32')
+    for i in range(img_data.shape[0]):
+        norm_img_data[i,:,:] = (img_data[i,:,:]/255 - mean_vec[i]) / stddev_vec[i]
+    norm_img_data = norm_img_data.reshape(1,3,224,224).astype('float32')
+
+    return norm_img_data
+
+def softmax(x):
+    x = x.reshape(-1)
+    e_x = np.exp(x - np.max(x))
+    return e_x / e_x.sum(axis = 0)
+
+def postprocess(result):
+    return softmax(np.array(result)).tolist()
+
+def convert_image_size(path):
+    image = Image.open(path)
+    print("raw Image size: ", image.size)
+
+    if image.size != (224, 224):
+        resized_img = image.resize((224,224),Image.Resampling.LANCZOS)
+        return resized_img
+    return image
+
+def infer_by_onnxruntime(path):
+    labels = load_labels('imagenet-simple-labels.json')
+    image = convert_image_size(path)
+
+    print("Image size: ", image.size)
+    
+    plt.imshow(image)
+    plt.axis('off')
+    #plt.show()
+
+    image_data = np.array(image).transpose(2,0,1)
+    input_data = preprocess(image_data)
+
+    session = onnxruntime.InferenceSession('model/resnet50v2.onnx', None)
+    input_name = session.get_inputs()[0].name
+
+    start = time.time()
+    raw_result = session.run([], {input_name: input_data})
+    end = time.time()
+    res = postprocess(raw_result)
+
+    infer_time = np.round((end -start) * 1000, 2)
+    idx = np.argmax(res)
+
+    print('final top prediction is:'+ labels[idx])
+    print('Inference time: '+ str(infer_time) + " ms")
+    
+def infer_by_torch(path, device):
+    labels = load_labels('imagenet-simple-labels.json')
+    image = convert_image_size(path)
+    image_data = np.array(image).transpose(2,0,1)
+    input_data =  torch.as_tensor(preprocess(image_data)).to(device)
+    print(input_data.shape)
+
+    model = torchvision.models.resnet50(torchvision.models.ResNet50_Weights.DEFAULT).to(device)
+    model.eval()
+
+    start = time.time()
+    with torch.inference_mode():
+        output = model(input_data)
+    idx = torch.argmax(output)
+    end = time.time()
+    infer_time = np.round((end -start) * 1000, 2)
+
+    print('torch prediction is:'+ labels[idx])
+    print('Inference time: '+ str(infer_time) + " ms")
+
+
+def convert_onnx_to_engine(path):
+    import tensorrt as trt
+    TRT_LOGGER = trt.Logger(trt.Logger.WARNING)
+    builder = trt.Builder(TRT_LOGGER)
+    network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH))
+    parser = trt.OnnxParser(network, TRT_LOGGER)
+
+    with open(path, 'rb') as model:
+        if not parser.parse(model.read()):
+            print('ERROR: Failed to parse the ONNX file.')
+            for error in range(parser.num_errors):
+                print(parser.get_error(error))
+            return None
+    config = builder.create_builder_config()
+    config.set_flag(trt.BuilderFlag.FP16)
+    config.max_workspace_size = 1 << 30
+
+    engine = builder.build_cuda_engine(network, config)
+    if engine is None:
+        print("engine build error")
+    return engine
+
+def infer_by_tensorrt(path, device):
+    import tensorrt as trt
+    import pucuda.driver as cuda
+    import pucuda.autoinit
+    labels = load_labels('imagenet-simple-labels.json')
+    image = convert_image_size(path)
+    image_data = np.array(image).transpose(2,0,1)
+    input_data =  torch.as_tensor(preprocess(image_data)).to(device)
+
+    engine = convert_onnx_to_engine(path)
+    context = engine.create_execution_context()
+
+    input_name = "input"
+    output_name = "output"
+    input_shape = (1, 3, 224, 224)
+
+    d_input = cuda.mem_alloc(np.prod(input_shape) * np.float32().itemsize)
+    d_output = cuda.mem_alloc(1000 * np.float32().itemsize)
+
+    context.set_tensor_address(input_name, int(d_input))
+    context.set_tensor_address(output_name, int(d_output))
+
+    context.execute_async_v3(stream_handle=0)
+
+    output_data = np.empty(1000, dtype=np.float32)
+    cuda.memcpy_dtoh(output_data, d_output)
+
+    idx = np.argmax(output_data)
+
+    print('torsorrt prediction is:'+ labels[idx])
+    
+
+if __name__ == "__main__":
+    #download_model_and_data()
+    #get_input_and_inf_output()
+    #print(len(inputs), len(ref_outputs))
+
+    #infer_by_onnx_runtime()
+    infer_by_image('data/resnet50v2/image/test.jpg')
+    infer_by_torch('data/resnet50v2/image/test.jpg', 'cuda')
+
+
+
